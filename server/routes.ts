@@ -5,9 +5,41 @@ import { setupAuth } from "./auth";
 import { insertClientSchema, insertDressTypeSchema, insertMeasurementSchema } from "@shared/schema";
 import { z } from "zod";
 
+// Function to initialize default dress types
+async function initDefaultDressTypes() {
+  try {
+    const dressTypes = await storage.getAllDressTypes();
+    
+    // If there are no dress types, add default ones
+    if (dressTypes.length === 0) {
+      console.log("No dress types found. Adding default dress types...");
+      
+      const defaultDressTypes = [
+        { name: "Formal Shirt", description: "Standard formal shirt measurements" },
+        { name: "Trousers", description: "Standard trousers measurements" },
+        { name: "Suit Jacket", description: "Standard suit jacket measurements" },
+        { name: "Traditional Wear", description: "Traditional clothing measurements" }
+      ];
+      
+      for (const dressType of defaultDressTypes) {
+        await storage.createDressType(dressType);
+      }
+      
+      console.log("Default dress types created successfully.");
+    } else {
+      console.log(`Found ${dressTypes.length} existing dress types.`);
+    }
+  } catch (error) {
+    console.error("Error initializing default dress types:", error);
+  }
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
   setupAuth(app);
+  
+  // Initialize default data
+  await initDefaultDressTypes();
 
   // Middleware to ensure user is authenticated
   const requireAuth = (req: any, res: any, next: any) => {
