@@ -7,8 +7,13 @@ import {
 } from "@shared/schema";
 import session from "express-session";
 import createMemoryStore from "memorystore";
+import connectPg from "connect-pg-simple";
+import { db } from "./db";
+import { eq, and } from "drizzle-orm";
+import { pool } from "./db";
 
 const MemoryStore = createMemoryStore(session);
+const PostgresSessionStore = connectPg(session);
 
 // Storage interface
 export interface IStorage {
@@ -16,7 +21,7 @@ export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
-  sessionStore: session.SessionStore;
+  sessionStore: any; // Using any to avoid session.SessionStore type issues
 
   // Clients
   getAllClients(): Promise<Client[]>;
@@ -46,7 +51,7 @@ export class MemStorage implements IStorage {
   private clients: Map<number, Client>;
   private dressTypes: Map<number, DressType>;
   private measurements: Map<number, Measurement>;
-  sessionStore: session.SessionStore;
+  sessionStore: any;
   
   private userIdCounter: number;
   private clientIdCounter: number;
@@ -241,4 +246,217 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+export class DatabaseStorage implements IStorage {
+  sessionStore: any;
+
+  constructor() {
+    this.sessionStore = new PostgresSessionStore({
+      pool, 
+      createTableIfMissing: true
+    });
+  }
+
+  // Auth methods
+  async getUser(id: number): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db.insert(users).values(insertUser).returning();
+    return user;
+  }
+
+  // Client methods
+  async getAllClients(): Promise<Client[]> {
+    return await db.select().from(clients);
+  }
+
+  async getClient(id: number): Promise<Client | undefined> {
+    const [client] = await db.select().from(clients).where(eq(clients.id, id));
+    return client;
+  }
+
+  async getClientWithMeasurements(id: number): Promise<ClientWithMeasurements | undefined> {
+    const [client] = await db.select().from(clients).where(eq(clients.id, id));
+    if (!client) return undefined;
+
+    // First retrieve the measurements
+    const measurementRows = await db.select().from(measurements).where(eq(measurements.clientId, id));
+    
+    // Then get the dress types for those measurements
+    const measurementsWithDressTypes = await Promise.all(
+      measurementRows.map(async (m) => {
+        const [dressType] = await db.select().from(dressTypes).where(eq(dressTypes.id, m.dressTypeId));
+        return {
+          ...m,
+          dressTypeName: dressType?.name || "Unknown",
+        };
+      })
+    );
+
+    return {
+      client,
+      measurements: measurementsWithDressTypes,
+    };
+  }
+
+  async createClient(insertClient: InsertClient): Promise<Client> {
+    // Handle nullable fields
+    const clientWithNullableFields = {
+      ...insertClient,
+      email: insertClient.email || null,
+      phone: insertClient.phone || null,
+      address: insertClient.address || null,
+      city: insertClient.city || null,
+      zipCode: insertClient.zipCode || null,
+      birthday: insertClient.birthday || null,
+      referralSource: insertClient.referralSource || null,
+      notes: insertClient.notes || null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    const [client] = await db.insert(clients).values(clientWithNullableFields).returning();
+    return client;
+  }
+
+  async updateClient(id: number, updateClient: InsertClient): Promise<Client | undefined> {
+    const [existingClient] = await db.select().from(clients).where(eq(clients.id, id));
+    if (!existingClient) return undefined;
+
+    // Handle nullable fields
+    const clientWithNullableFields = {
+      ...updateClient,
+      email: updateClient.email || null,
+      phone: updateClient.phone || null,
+      address: updateClient.address || null,
+      city: updateClient.city || null,
+      zipCode: updateClient.zipCode || null,
+      birthday: updateClient.birthday || null,
+      referralSource: updateClient.referralSource || null,
+      notes: updateClient.notes || null,
+      updatedAt: new Date()
+    };
+
+    const [updatedClient] = await db
+      .update(clients)
+      .set(clientWithNullableFields)
+      .where(eq(clients.id, id))
+      .returning();
+
+    return updatedClient;
+  }
+
+  async deleteClient(id: number): Promise<boolean> {
+    // Delete associated measurements first
+    await db.delete(measurements).where(eq(measurements.clientId, id));
+    
+    // Delete the client
+    const result = await db.delete(clients).where(eq(clients.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // Dress Type methods
+  async getAllDressTypes(): Promise<DressType[]> {
+    return await db.select().from(dressTypes);
+  }
+
+  async getDressType(id: number): Promise<DressType | undefined> {
+    const [dressType] = await db.select().from(dressTypes).where(eq(dressTypes.id, id));
+    return dressType;
+  }
+
+  async createDressType(insertDressType: InsertDressType): Promise<DressType> {
+    // Handle nullable fields
+    const dressTypeWithNullableFields = {
+      ...insertDressType,
+      description: insertDressType.description || null
+    };
+    
+    const [dressType] = await db.insert(dressTypes).values(dressTypeWithNullableFields).returning();
+    return dressType;
+  }
+
+  async updateDressType(id: number, updateDressType: InsertDressType): Promise<DressType | undefined> {
+    const [existingDressType] = await db.select().from(dressTypes).where(eq(dressTypes.id, id));
+    if (!existingDressType) return undefined;
+
+    // Handle nullable fields
+    const dressTypeWithNullableFields = {
+      ...updateDressType,
+      description: updateDressType.description || null
+    };
+
+    const [updatedDressType] = await db
+      .update(dressTypes)
+      .set(dressTypeWithNullableFields)
+      .where(eq(dressTypes.id, id))
+      .returning();
+
+    return updatedDressType;
+  }
+
+  async deleteDressType(id: number): Promise<boolean> {
+    const result = await db.delete(dressTypes).where(eq(dressTypes.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // Measurement methods
+  async getMeasurement(id: number): Promise<Measurement | undefined> {
+    const [measurement] = await db.select().from(measurements).where(eq(measurements.id, id));
+    return measurement;
+  }
+
+  async getMeasurementsByClientId(clientId: number): Promise<Measurement[]> {
+    return await db.select().from(measurements).where(eq(measurements.clientId, clientId));
+  }
+
+  async createMeasurement(insertMeasurement: InsertMeasurement): Promise<Measurement> {
+    // Handle nullable fields
+    const measurementWithNullableFields = {
+      ...insertMeasurement,
+      notes: insertMeasurement.notes || null,
+      stylePreferences: insertMeasurement.stylePreferences || null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    const [measurement] = await db.insert(measurements).values(measurementWithNullableFields).returning();
+    return measurement;
+  }
+
+  async updateMeasurement(id: number, updateMeasurement: InsertMeasurement): Promise<Measurement | undefined> {
+    const [existingMeasurement] = await db.select().from(measurements).where(eq(measurements.id, id));
+    if (!existingMeasurement) return undefined;
+
+    // Handle nullable fields
+    const measurementWithNullableFields = {
+      ...updateMeasurement,
+      notes: updateMeasurement.notes || null,
+      stylePreferences: updateMeasurement.stylePreferences || null,
+      updatedAt: new Date()
+    };
+
+    const [updatedMeasurement] = await db
+      .update(measurements)
+      .set(measurementWithNullableFields)
+      .where(eq(measurements.id, id))
+      .returning();
+
+    return updatedMeasurement;
+  }
+
+  async deleteMeasurement(id: number): Promise<boolean> {
+    const result = await db.delete(measurements).where(eq(measurements.id, id)).returning();
+    return result.length > 0;
+  }
+}
+
+// Switch from memory storage to database storage
+export const storage = new DatabaseStorage();
